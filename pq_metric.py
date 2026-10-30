@@ -1,52 +1,56 @@
-
-
-
 import numpy as np
 
 
 def match_instances(gt, pred, iou_thr=0.5):
-    g = gt.astype(np.int64).ravel()
-    p = pred.astype(np.int64).ravel()
 
-    g_ids, g_area = np.unique(g[g > 0], return_counts=True)
-    p_ids, p_area = np.unique(p[p > 0], return_counts=True)
-    g_area = dict(zip(g_ids.tolist(), g_area.tolist()))
-    p_area = dict(zip(p_ids.tolist(), p_area.tolist()))
-
+    gt, pred = np.asarray(gt), np.asarray(pred)
+    if gt.shape != pred.shape or gt.ndim != 2:
+        raise ValueError("Ground truth and prediction must have the same HxW shape")
+    if not 0.5 <= iou_thr <= 1:
+        raise ValueError("Exclusive-map PQ requires 0.5 <= iou_thr <= 1")
+    if gt.dtype.kind not in "biu" or pred.dtype.kind not in "biu":
+        raise ValueError("Instance maps must contain integer labels")
+    g, p = gt.ravel(), pred.ravel()
+    if (g.size and g.min() < 0) or (p.size and p.min() < 0):
+        raise ValueError("Instance labels must be nonnegative")
+    gm, pm = int(g.max(initial=0)), int(p.max(initial=0))
     both = (g > 0) & (p > 0)
-    if both.any():
 
-        base = int(p.max()) + 1
-        code = g[both] * base + p[both]
-        codes, inter = np.unique(code, return_counts=True)
+
+    if (gm + 1) * (pm + 1) <= 1_000_000:
+        g = g.astype(np.int64, copy=False)
+        p = p.astype(np.int64, copy=False)
+        ga = np.bincount(g, minlength=gm + 1)
+        pa = np.bincount(p, minlength=pm + 1)
+        ng, npred = np.count_nonzero(ga[1:]), np.count_nonzero(pa[1:])
+        base = pm + 1
+        counts = np.bincount(g[both] * base + p[both])
+        codes = np.flatnonzero(counts)
         gi, pi = codes // base, codes % base
+        inter = counts[codes]
+        g_inter_area, p_inter_area = ga[gi], pa[pi]
     else:
-        gi = pi = inter = np.array([], dtype=np.int64)
-
-    tp, iou_sum = 0, 0.0
-    for a, b, i in zip(gi, pi, inter):
-        union = g_area[int(a)] + p_area[int(b)] - int(i)
-        iou = i / union
-        if iou > iou_thr:
-            tp += 1
-            iou_sum += iou
-
-    fp = len(p_area) - tp
-    fn = len(g_area) - tp
 
 
-    n_split = n_merge = 0
-    if len(gi):
-        from collections import defaultdict
-        per_g, per_p = defaultdict(int), defaultdict(int)
-        for a, b, i in zip(gi, pi, inter):
-            if i / p_area[int(b)] >= 0.1:
-                per_g[int(a)] += 1
-            if i / g_area[int(a)] >= 0.1:
-                per_p[int(b)] += 1
-        n_split = sum(v > 1 for v in per_g.values())
-        n_merge = sum(v > 1 for v in per_p.values())
-    return tp, fp, fn, iou_sum, n_split, n_merge
+        g_ids, g_counts = np.unique(g[g > 0], return_counts=True)
+        p_ids, p_counts = np.unique(p[p > 0], return_counts=True)
+        ng, npred = len(g_ids), len(p_ids)
+
+        compact_g = np.searchsorted(g_ids, g[both])
+        compact_p = np.searchsorted(p_ids, p[both])
+        pairs, inter = np.unique(np.column_stack((compact_g, compact_p)),
+                                 axis=0, return_counts=True)
+        gi, pi = pairs[:, 0], pairs[:, 1]
+        g_inter_area, p_inter_area = g_counts[gi], p_counts[pi]
+
+    ious = inter / (g_inter_area + p_inter_area - inter)
+    matched = ious > iou_thr
+    tp = int(matched.sum())
+
+    _, split_counts = np.unique(gi[inter / p_inter_area >= 0.1], return_counts=True)
+    _, merge_counts = np.unique(pi[inter / g_inter_area >= 0.1], return_counts=True)
+    return (tp, int(npred - tp), int(ng - tp), float(ious[matched].sum()),
+            int((split_counts > 1).sum()), int((merge_counts > 1).sum()))
 
 
 class PQAccumulator:

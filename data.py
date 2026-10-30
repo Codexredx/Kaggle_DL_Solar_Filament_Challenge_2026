@@ -154,10 +154,44 @@ def rle_encode(mask):
     return mu.encode(binary)["counts"].decode("ascii")
 
 
+def rle_counts(encoded):
+    if not isinstance(encoded, str) or not encoded:
+        raise ValueError("Compressed RLE must be a nonempty string")
+    counts = []
+    position = 0
+    while position < len(encoded):
+        value, shift = 0, 0
+        while True:
+            if position == len(encoded):
+                raise ValueError("Truncated compressed RLE count")
+            code = ord(encoded[position]) - 48
+            position += 1
+            if not 0 <= code <= 63:
+                raise ValueError("Invalid character in compressed RLE")
+            value |= (code & 31) << shift
+            shift += 5
+            if not code & 32:
+                if code & 16:
+                    value -= 1 << shift
+                break
+            if shift > 60:
+                raise ValueError("Compressed RLE count is too large")
+        if len(counts) > 2:
+            value += counts[-2]
+        if value < 0:
+            raise ValueError("Compressed RLE contains a negative run length")
+        counts.append(value)
+    return counts
+
+
 def rle_decode(s, shape):
     from pycocotools import mask as mu
     if not isinstance(s, str) or not s:
         return np.zeros(shape, dtype=np.uint8)
+    counts = rle_counts(s)
+    pixels = int(np.prod(shape))
+    if sum(counts) != pixels:
+        raise ValueError(f"RLE runs cover {sum(counts)} pixels; expected {pixels}")
     return mu.decode({"counts": s.encode("ascii"), "size": list(shape)}).astype(np.uint8)
 
 

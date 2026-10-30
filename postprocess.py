@@ -1,12 +1,9 @@
-
-
-
 import itertools
 import cv2
 import numpy as np
 from skimage.filters import apply_hysteresis_threshold
 from skimage.feature import peak_local_max
-from skimage.segmentation import watershed
+from skimage.segmentation import watershed as sk_watershed
 from scipy import ndimage as ndi
 
 from pq_metric import PQAccumulator
@@ -36,13 +33,15 @@ def prob_to_instances(prob, low=0.35, high=0.6, close_px=3, min_area=30,
                              exclude_border=False)
         markers = np.zeros(mask.shape, np.int32)
         markers[tuple(pts.T)] = np.arange(1, len(pts) + 1)
-        return watershed(-dist, markers, mask=mask).astype(np.int32)
+        return sk_watershed(-dist, markers, mask=mask).astype(np.int32)
 
     n, labels = cv2.connectedComponents(mask.astype(np.uint8), connectivity=8)
     return labels.astype(np.int32)
 
 
 def evaluate(probs, gts, **params):
+    if len(probs) != len(gts) or not len(probs):
+        raise ValueError("Need equal, nonempty probability and ground-truth lists")
     acc = PQAccumulator()
     for p, g in zip(probs, gts):
         acc.update(g, prob_to_instances(p, **params))
@@ -50,9 +49,43 @@ def evaluate(probs, gts, **params):
 
 
 def tune(probs, gts, grid=None, verbose=True):
-    grid = grid or dict(low=[0.25, 0.35, 0.45], high=[0.5, 0.6, 0.7],
-                        close_px=[0, 2, 4, 6], min_area=[10, 30, 100],
-                        watershed=[False])
+
+
+    if grid is None:
+        candidates = dict(low=[0.2, 0.35, 0.45, 0.6],
+                          high=[0.5, 0.6, 0.7, 0.85],
+                          close_px=[0, 3, 6, 9],
+                          min_area=[30, 100, 300, 1000])
+        best, best_pq, scores = dict(DEFAULTS), -1.0, {}
+
+        def score(params):
+            key = tuple(sorted(params.items()))
+            if key not in scores:
+                result = evaluate(probs, gts, **params)
+                scores[key] = result["PQ"]
+                if verbose:
+                    print(params, f"PQ={result['PQ']:.4f}", flush=True)
+            return scores[key]
+
+
+        for start in [dict(DEFAULTS), {**DEFAULTS, "low": 0.45,
+                                       "high": 0.7, "close_px": 6, "min_area": 100}]:
+            current, value = start, score(start)
+            for _ in range(2):
+                changed = False
+                for name, values in candidates.items():
+                    for candidate in values:
+                        params = {**current, name: candidate}
+                        if params["low"] > params["high"]:
+                            continue
+                        pq = score(params)
+                        if pq > value:
+                            current, value, changed = params, pq, True
+                if not changed:
+                    break
+            if value > best_pq:
+                best, best_pq = current, value
+        return best, best_pq
     keys = list(grid)
     best, best_pq = None, -1
     for combo in itertools.product(*[grid[k] for k in keys]):

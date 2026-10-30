@@ -1,4 +1,3 @@
-
 import time
 import numpy as np
 import torch
@@ -58,10 +57,17 @@ def model_size_mb(model):
 
 
 @torch.no_grad()
-def predict_prob(model, img, device, tta=False, half=False, tile_size=512, overlap=64):
+def predict_prob(model, img, device, tta=False, half=False, tile_size=512, overlap=64,
+                 blend="uniform"):
+
     model.eval()
     if tile_size <= 0 or overlap < 0 or overlap >= tile_size:
         raise ValueError("Require tile_size > 0 and 0 <= overlap < tile_size")
+    if blend not in {"uniform", "hann"}:
+        raise ValueError("blend must be 'uniform' or 'hann'")
+    img = np.asarray(img)
+    if img.ndim != 2 or not all(img.shape):
+        raise ValueError("Expected a nonempty HxW image")
     h, w = img.shape
     stride = tile_size - overlap
 
@@ -75,6 +81,7 @@ def predict_prob(model, img, device, tta=False, half=False, tile_size=512, overl
 
     acc = np.zeros((h, w), dtype=np.float32)
     count = np.zeros((h, w), dtype=np.float32)
+    weights = {}
     for y0 in starts(h):
         for x0 in starts(w):
             tile = np.ascontiguousarray(img[y0:y0+tile_size, x0:x0+tile_size])
@@ -91,9 +98,19 @@ def predict_prob(model, img, device, tta=False, half=False, tile_size=512, overl
                          fwd(inp.flip((-2,))).flip((-2,)),
                          fwd(inp.flip((-1, -2))).flip((-1, -2))]
             patch = torch.stack(outs).mean(0)[0, 0, :th, :tw].cpu().numpy()
-            acc[y0:y0+th, x0:x0+tw] += patch
-            count[y0:y0+th, x0:x0+tw] += 1.0
-    return acc / np.maximum(count, 1.0)
+            if (th, tw) not in weights:
+                if blend == "hann":
+
+
+                    weights[th, tw] = np.maximum(
+                        np.outer(np.hanning(th), np.hanning(tw)), 1e-3
+                    ).astype(np.float32)
+                else:
+                    weights[th, tw] = np.ones((th, tw), dtype=np.float32)
+            weight = weights[th, tw]
+            acc[y0:y0+th, x0:x0+tw] += patch * weight
+            count[y0:y0+th, x0:x0+tw] += weight
+    return acc / np.maximum(count, np.finfo(np.float32).tiny)
 
 
 @torch.no_grad()
